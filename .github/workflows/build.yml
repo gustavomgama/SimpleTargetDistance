@@ -1,0 +1,22 @@
+name: Package
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nebularg/actions-luacheck@v1
+      - uses: BigWigsMods/packager@master
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          CF_PROJECT_ID: 1791034
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}

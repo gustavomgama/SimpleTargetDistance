@@ -1,0 +1,15 @@
+## Interface: 16001
+## Title: SimpleTargetDistance
+## Notes: Shows raw distance data for your target.
+## Author: dev
+## Version: 1.0.0
+## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
+## SavedVariables: SimpleTargetDistanceDB
+## X-Curse-Project-ID: 1791034
+
+# Libraries
+libs\LibStub\LibStub.lua
+libs\LibRangeCheck-3.0\LibRangeCheck-3.0.lua
+
+# Core
+SimpleTargetDistance.lua
