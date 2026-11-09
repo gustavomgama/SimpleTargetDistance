@@ -29,10 +29,26 @@ frame.locked = true
 local rangeLib = nil
 local isSecret = issecretvalue or function() return false end
 
+local function guidDist(unit)
+    if type(UnitGUID) ~= "function" then return nil end
+    local guid = UnitGUID(unit)
+    local kind = (guid or ""):match("^(%a+)%-")
+    local id = (guid or ""):match("%-(%d+)%-%x*$")
+    id = id and tonumber(id)
+    if kind == "Creature" and type(ClosestUnitPosition) == "function" and id then
+        local ok, _, _, dist = pcall(ClosestUnitPosition, id)
+        if ok and type(dist) == "number" and not isSecret(dist) then return dist end
+    elseif kind == "GameObject" and type(ClosestGameObjectPosition) == "function" and id then
+        local ok, _, _, dist = pcall(ClosestGameObjectPosition, id)
+        if ok and type(dist) == "number" and not isSecret(dist) then return dist end
+    end
+    return nil
+end
+
 local function measure()
     if not UnitExists("target") then return "" end
+    if UnitIsUnit("target", "player") then return "0.0" end
 
-    -- exact distance (group members / same instance / creatures)
     local best = nil
     if type(UnitDistanceSquared) == "function" then
         local sq, checked = UnitDistanceSquared("target")
@@ -40,15 +56,7 @@ local function measure()
             best = math.sqrt(sq)
         end
     end
-    if not best and type(UnitCreatureID) == "function" and type(ClosestUnitPosition) == "function" then
-        local cid = UnitCreatureID("target")
-        if type(cid) == "number" and not isSecret(cid) then
-            local ok, _, _, dist = pcall(ClosestUnitPosition, cid)
-            if ok and type(dist) == "number" and not isSecret(dist) then
-                best = dist
-            end
-        end
-    end
+    if not best then best = guidDist("target") end
     if not best and type(UnitPosition) == "function" then
         local py, px, pz, pinst = UnitPosition("player")
         local ty, tx, tz, tinst = UnitPosition("target")
@@ -59,11 +67,8 @@ local function measure()
             best = math.sqrt(dx * dx + dy * dy + dz * dz)
         end
     end
-    if best then
-        return string.format("%.1f", best)
-    end
+    if best then return string.format("%.1f", best) end
 
-    -- bracketed distance (any target) via LibRangeCheck-3.0
     if rangeLib == nil and _G.LibStub then
         local ok, lib = pcall(_G.LibStub, "LibRangeCheck-3.0", true)
         if ok then rangeLib = lib end
@@ -71,13 +76,9 @@ local function measure()
     if rangeLib and type(rangeLib.GetRange) == "function" then
         local ok, mn, mx = pcall(rangeLib.GetRange, rangeLib, "target")
         if ok and not (isSecret(mn) or (mx ~= nil and isSecret(mx))) then
-            if mn and mx then
-                return mn .. " - " .. mx
-            elseif mx then
-                return "<= " .. mx
-            elseif mn then
-                return ">= " .. mn
-            end
+            if mn and mx then return "~" .. math.floor((mn + mx) / 2 + 0.5) end
+            if mx then return "<= " .. mx end
+            if mn then return ">= " .. mn end
         end
     end
 
