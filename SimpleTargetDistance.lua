@@ -1,12 +1,44 @@
 local addonName = ...
 
+-- Explicit state machine: elevates UX/DX/AX by making implicit transitions visible
+local State = {
+    Init = {
+        UNINITIALIZED = "UNINITIALIZED",
+        INITIALIZING  = "INITIALIZING",
+        INITIALIZED   = "INITIALIZED",
+    },
+    Target = {
+        NONE = "NONE",
+        HAS  = "HAS",
+    },
+    Lock = {
+        LOCKED   = "LOCKED",
+        UNLOCKED = "UNLOCKED",
+    },
+    Ticker = {
+        STOPPED = "STOPPED",
+        RUNNING = "RUNNING",
+    },
+}
+
+local sm = {
+    init   = State.Init.UNINITIALIZED,
+    target = State.Target.NONE,
+    lock   = State.Lock.LOCKED,
+    ticker = nil,
+}
+
 local frame = CreateFrame("Frame", "SimpleTargetDistanceFrame", UIParent)
 frame:SetSize(120, 24)
 frame:SetPoint("CENTER", 0, 0)
 frame:SetMovable(true)
 frame:EnableMouse(true)
 frame:RegisterForDrag("LeftButton")
-frame:SetScript("OnDragStart", function(self) if not self.locked then self:StartMoving() end end)
+frame:SetScript("OnDragStart", function(self)
+    if sm.lock == State.Lock.UNLOCKED then
+        self:StartMoving()
+    end
+end)
 frame:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
     SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
@@ -29,9 +61,18 @@ frame.locked = true
 local rangeLib = nil
 local isSecret = issecretvalue or function() return false end
 
-local function guidDist(unit)
+-- Measurement strategy pipeline (explicit)
+local function measureUnitDistanceSquared()
+    if type(UnitDistanceSquared) ~= "function" then return nil end
+    local sq, checked = UnitDistanceSquared("target")
+    if isSecret(sq) or isSecret(checked) then return nil end
+    if type(sq) ~= "number" or not checked then return nil end
+    return math.sqrt(sq)
+end
+
+local function measureGuidDistance()
     if type(UnitGUID) ~= "function" then return nil end
-    local guid = UnitGUID(unit)
+    local guid = UnitGUID("target")
     local kind = (guid or ""):match("^(%a+)%-")
     local id = (guid or ""):match("%-(%d+)%-%x*$")
     id = id and tonumber(id)
@@ -45,61 +86,114 @@ local function guidDist(unit)
     return nil
 end
 
+local function measureUnitPosition()
+    if type(UnitPosition) ~= "function" then return nil end
+    local py, px, pz, pinst = UnitPosition("player")
+    local ty, tx, tz, tinst = UnitPosition("target")
+    if type(px) ~= "number" or type(py) ~= "number" or type(tx) ~= "number" or type(ty) ~= "number" then return nil end
+    if pinst ~= tinst then return nil end
+    if isSecret(px) or isSecret(py) or isSecret(tx) or isSecret(ty) then return nil end
+    local dx, dy = px - tx, py - ty
+    local dz = (type(pz) == "number" and type(tz) == "number" and not isSecret(pz) and not isSecret(tz)) and (pz - tz) or 0
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function ensureRangeLib()
+    if rangeLib ~= nil then return rangeLib end
+    if type(_G.LibStub) ~= "function" then return nil end
+    local ok, lib = pcall(_G.LibStub, "LibRangeCheck-3.0", true)
+    if ok and lib then
+        rangeLib = lib
+        return rangeLib
+    end
+    return nil
+end
+
+local function measureRangeLib()
+    local lib = ensureRangeLib()
+    if not lib or type(lib.GetRange) ~= "function" then return nil end
+    local ok, mn, mx = pcall(lib.GetRange, lib, "target")
+    if not ok then return nil end
+    if isSecret(mn) or (mx ~= nil and isSecret(mx)) then return nil end
+    if mn and mx then return "~" .. math.floor((mn + mx) / 2 + 0.5) end
+    if mx then return "<= " .. mx end
+    if mn then return ">= " .. mn end
+    return nil
+end
+
 local function measure()
     if not UnitExists("target") then return "" end
     if UnitIsUnit("target", "player") then return "0.0" end
 
-    local best = nil
-    if type(UnitDistanceSquared) == "function" then
-        local sq, checked = UnitDistanceSquared("target")
-        if not (isSecret(sq) or isSecret(checked)) and type(sq) == "number" and checked then
-            best = math.sqrt(sq)
-        end
-    end
-    if not best then best = guidDist("target") end
-    if not best and type(UnitPosition) == "function" then
-        local py, px, pz, pinst = UnitPosition("player")
-        local ty, tx, tz, tinst = UnitPosition("target")
-        if type(px) == "number" and type(py) == "number" and type(tx) == "number" and type(ty) == "number" and pinst == tinst
-            and not (isSecret(px) or isSecret(py) or isSecret(tx) or isSecret(ty)) then
-            local dx, dy = px - tx, py - ty
-            local dz = (type(pz) == "number" and type(tz) == "number") and (pz - tz) or 0
-            best = math.sqrt(dx * dx + dy * dy + dz * dz)
-        end
-    end
+    local best = measureUnitDistanceSquared()
+    if not best then best = measureGuidDistance() end
+    if not best then best = measureUnitPosition() end
     if best then return string.format("%.1f", best) end
 
-    if rangeLib == nil and _G.LibStub then
-        local ok, lib = pcall(_G.LibStub, "LibRangeCheck-3.0", true)
-        if ok then rangeLib = lib end
-    end
-    if rangeLib and type(rangeLib.GetRange) == "function" then
-        local ok, mn, mx = pcall(rangeLib.GetRange, rangeLib, "target")
-        if ok and not (isSecret(mn) or (mx ~= nil and isSecret(mx))) then
-            if mn and mx then return "~" .. math.floor((mn + mx) / 2 + 0.5) end
-            if mx then return "<= " .. mx end
-            if mn then return ">= " .. mn end
-        end
-    end
+    local libRes = measureRangeLib()
+    if libRes then return libRes end
 
     return "?"
 end
 
-local ticker = nil
-
 local function startTicker()
-    if ticker then return end
-    ticker = C_Timer.NewTicker(0.2, function()
-        if not UnitExists("target") then
+    if sm.ticker then return end
+    sm.ticker = C_Timer.NewTicker(0.2, function()
+        if sm.target ~= State.Target.HAS or not UnitExists("target") then
             text:SetText("")
+            if sm.ticker then
+                sm.ticker:Cancel()
+                sm.ticker = nil
+            end
+            sm.target = State.Target.NONE
             return
         end
         text:SetText(measure())
     end)
+    sm.target = (UnitExists("target") and State.Target.HAS) or State.Target.NONE
 end
 
 local function stopTicker()
-    if ticker then ticker:Cancel(); ticker = nil end
+    if sm.ticker then
+        sm.ticker:Cancel()
+        sm.ticker = nil
+    end
+end
+
+local function transitionToTargetHas()
+    if sm.target == State.Target.HAS then
+        text:SetText(measure())
+        if sm.ticker == nil then startTicker() end
+        return
+    end
+    sm.target = State.Target.HAS
+    text:SetText(measure())
+    startTicker()
+end
+
+local function transitionToTargetNone()
+    if sm.target == State.Target.NONE and sm.ticker == nil and text:GetText() == "" then
+        return
+    end
+    sm.target = State.Target.NONE
+    text:SetText("")
+    stopTicker()
+end
+
+local function applyLockState(locked)
+    if locked then
+        sm.lock = State.Lock.LOCKED
+        frame.locked = true
+        SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
+        SimpleTargetDistanceDB.locked = true
+        frame:EnableMouse(false)
+    else
+        sm.lock = State.Lock.UNLOCKED
+        frame.locked = false
+        SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
+        SimpleTargetDistanceDB.locked = false
+        frame:EnableMouse(true)
+    end
 end
 
 
@@ -108,49 +202,43 @@ frame:RegisterEvent("ADDON_LOADED")
 frame:SetScript("OnEvent", function(self, event, name)
     if event == "PLAYER_TARGET_CHANGED" then
         if UnitExists("target") then
-            text:SetText(measure())
-            startTicker()
+            transitionToTargetHas()
         else
-            text:SetText("")
-            stopTicker()
+            transitionToTargetNone()
         end
         return
     end
     if event ~= "ADDON_LOADED" or name ~= addonName then return end
+    sm.init = State.Init.INITIALIZING
     SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
     if SimpleTargetDistanceDB.point then
         self:ClearAllPoints()
         self:SetPoint(SimpleTargetDistanceDB.point, UIParent, SimpleTargetDistanceDB.relativePoint or "CENTER", SimpleTargetDistanceDB.x or 0, SimpleTargetDistanceDB.y or 0)
     end
-    if _G.LibStub then
-        local ok, lib = pcall(_G.LibStub, "LibRangeCheck-3.0", true)
-        if ok then rangeLib = lib end
-    end
-    self.locked = SimpleTargetDistanceDB.locked
-    if self.locked == nil then self.locked = true end
-    SimpleTargetDistanceDB.locked = self.locked
-    self:EnableMouse(not self.locked)
+    ensureRangeLib()
+    local locked = SimpleTargetDistanceDB.locked
+    if locked == nil then locked = true end
+    applyLockState(locked)
     print("|cff00ff00SimpleTargetDistance|r loaded  /std unlock|lock|reset")
     if UnitExists("target") then
-        text:SetText(measure())
-        startTicker()
+        transitionToTargetHas()
+    else
+        transitionToTargetNone()
     end
+    sm.init = State.Init.INITIALIZED
     self:UnregisterEvent("ADDON_LOADED")
 end)
 
 SLASH_SIMPLETARGETDISTANCE1 = "/std"
 SlashCmdList["SIMPLETARGETDISTANCE"] = function(msg)
-    msg = (msg or ""):match("^%s*(.-)%s*$"):lower()
+    msg = (msg or ""):match("^%s*(.-)%s*$")
+    msg = msg and msg:lower() or ""
     SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
     if msg == "lock" then
-        frame.locked = true
-        SimpleTargetDistanceDB.locked = true
-        frame:EnableMouse(false)
+        applyLockState(true)
         print("STD: locked")
     elseif msg == "unlock" then
-        frame.locked = false
-        SimpleTargetDistanceDB.locked = false
-        frame:EnableMouse(true)
+        applyLockState(false)
         print("STD: unlocked (drag)")
     elseif msg == "reset" then
         frame:ClearAllPoints()
