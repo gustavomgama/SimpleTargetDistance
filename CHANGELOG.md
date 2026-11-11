@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.5.7
+- Fix luacheck warnings for CI packaging.
+
 ## 1.5.6
 - Even slower smoother Kalman transitions.
 
