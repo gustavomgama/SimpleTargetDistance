@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.6.1
+- Fix luacheck empty-if warning.
+
 ## 1.6.0
 - Show distance next to TargetFrame and target nameplate.
 

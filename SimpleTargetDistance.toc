@@ -2,7 +2,7 @@
 ## Title: SimpleTargetDistance
 ## Notes: Shows raw distance data for your target.
 ## Author: dev
-## Version: 1.6.0
+## Version: 1.6.1
 ## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
 ## SavedVariables: SimpleTargetDistanceDB
 ## X-Curse-Project-ID: 1791034

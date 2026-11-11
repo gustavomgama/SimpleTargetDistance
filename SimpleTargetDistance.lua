@@ -239,9 +239,6 @@ frame:SetScript("OnEvent", function(self, event, name)
     if event == "NAME_PLATE_UNIT_ADDED" or event == "NAME_PLATE_UNIT_REMOVED" then
         if name == "target" or (type(UnitIsUnit) == "function" and UnitIsUnit(name, "target")) then
             -- recreate nameplate text on next refresh
-            if extraTexts.nameplate and extraTexts.nameplate:GetParent() then
-                -- keep
-            end
             extraTexts.nameplate = nil
             if hasTarget then refreshAll() end
         end
