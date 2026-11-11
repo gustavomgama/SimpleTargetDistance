@@ -24,7 +24,38 @@ text:SetPoint("CENTER", frame, "CENTER", 0, 0)
 local font = text:GetFont()
 text:SetFont(font, 18, "OUTLINE")
 text:SetTextColor(1, 0.82, 0)
-text:SetText("")
+text:SetText(""); updateExtras("")
+
+local extraTexts = { targetFrame = nil, nameplate = nil }
+
+local function ensureTargetFrameText()
+    if extraTexts.targetFrame then return extraTexts.targetFrame end
+    if type(TargetFrame) ~= "table" then return nil end
+    local fs = TargetFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    fs:SetPoint("LEFT", TargetFrame, "RIGHT", 4, 0)
+    fs:SetFont(font, 14, "OUTLINE")
+    extraTexts.targetFrame = fs
+    return fs
+end
+
+local function ensureNameplateText()
+    if type(C_NamePlate) ~= "table" or type(C_NamePlate.GetNamePlateForUnit) ~= "function" then return nil end
+    local np = C_NamePlate.GetNamePlateForUnit("target")
+    if not np then return nil end
+    if np._stdText then return np._stdText end
+    local fs = np:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    fs:SetPoint("LEFT", np, "RIGHT", 4, 0)
+    fs:SetFont(font, 12, "OUTLINE")
+    np._stdText = fs
+    return fs
+end
+
+local function updateExtras(d)
+    local tf = ensureTargetFrameText()
+    if tf then tf:SetText(d or "") end
+    local np = ensureNameplateText()
+    if np then np:SetText(d or "") end
+end
 
 frame.locked = true
 
@@ -165,6 +196,12 @@ local function measure()
     return "?"
 end
 
+local function refreshAll()
+    local d = measure()
+    text:SetText(d)
+    updateExtras(d)
+end
+
 local function stopTicker()
     if ticker then ticker:Cancel(); ticker = nil end
 end
@@ -173,12 +210,12 @@ local function startTicker()
     if ticker then return end
     ticker = C_Timer.NewTicker(0.2, function()
         if not hasTarget or not UnitExists("target") then
-            text:SetText("")
+            text:SetText(""); updateExtras("")
             stopTicker()
             hasTarget = false
             return
         end
-        text:SetText(measure())
+        refreshAll()
     end)
 end
 
@@ -192,9 +229,22 @@ end
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_SWING")
+frame:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+frame:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 frame:SetScript("OnEvent", function(self, event, name)
     if event == "PLAYER_SWING" then
         lastSwingTime = GetTime()
+        return
+    end
+    if event == "NAME_PLATE_UNIT_ADDED" or event == "NAME_PLATE_UNIT_REMOVED" then
+        if name == "target" or (type(UnitIsUnit) == "function" and UnitIsUnit(name, "target")) then
+            -- recreate nameplate text on next refresh
+            if extraTexts.nameplate and extraTexts.nameplate:GetParent() then
+                -- keep
+            end
+            extraTexts.nameplate = nil
+            if hasTarget then refreshAll() end
+        end
         return
     end
     if event == "PLAYER_TARGET_CHANGED" then
@@ -202,11 +252,11 @@ frame:SetScript("OnEvent", function(self, event, name)
         smooth, smoothVel, smoothTime = nil, 0, 0
         if UnitExists("target") then
             hasTarget = true
-            text:SetText(measure())
+            refreshAll()
             startTicker()
         else
             hasTarget = false
-            text:SetText("")
+            text:SetText(""); updateExtras("")
             stopTicker()
         end
         return
@@ -222,11 +272,11 @@ frame:SetScript("OnEvent", function(self, event, name)
     print("|cff00ff00SimpleTargetDistance|r loaded  /std unlock|lock|reset")
     if UnitExists("target") then
         hasTarget = true
-        text:SetText(measure())
+        refreshAll()
         startTicker()
     else
         hasTarget = false
-        text:SetText("")
+        text:SetText(""); updateExtras("")
         stopTicker()
     end
     self:UnregisterEvent("ADDON_LOADED")

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.6.0
+- Show distance next to TargetFrame and target nameplate.
+
 ## 1.5.7
 - Fix luacheck warnings for CI packaging.
 
