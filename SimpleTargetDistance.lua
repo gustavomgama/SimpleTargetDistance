@@ -1,33 +1,5 @@
 local addonName = ...
 
--- Explicit state machine: elevates UX/DX/AX by making implicit transitions visible
-local State = {
-    Init = {
-        UNINITIALIZED = "UNINITIALIZED",
-        INITIALIZING  = "INITIALIZING",
-        INITIALIZED   = "INITIALIZED",
-    },
-    Target = {
-        NONE = "NONE",
-        HAS  = "HAS",
-    },
-    Lock = {
-        LOCKED   = "LOCKED",
-        UNLOCKED = "UNLOCKED",
-    },
-    Ticker = {
-        STOPPED = "STOPPED",
-        RUNNING = "RUNNING",
-    },
-}
-
-local sm = {
-    init   = State.Init.UNINITIALIZED,
-    target = State.Target.NONE,
-    lock   = State.Lock.LOCKED,
-    ticker = nil,
-}
-
 local frame = CreateFrame("Frame", "SimpleTargetDistanceFrame", UIParent)
 frame:SetSize(120, 24)
 frame:SetPoint("CENTER", 0, 0)
@@ -35,9 +7,7 @@ frame:SetMovable(true)
 frame:EnableMouse(true)
 frame:RegisterForDrag("LeftButton")
 frame:SetScript("OnDragStart", function(self)
-    if sm.lock == State.Lock.UNLOCKED then
-        self:StartMoving()
-    end
+    if not frame.locked then self:StartMoving() end
 end)
 frame:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
@@ -58,32 +28,18 @@ text:SetText("")
 
 frame.locked = true
 
-local rangeLib = nil
 local isSecret = issecretvalue or function() return false end
+local rangeLib = nil
+local lastExact, lastExactTime, lastSwingTime = nil, 0, 0
+local hasTarget, ticker = false, nil
+local smooth, smoothVel, smoothTime = nil, 0, 0
 
--- Measurement strategy pipeline (explicit)
 local function measureUnitDistanceSquared()
     if type(UnitDistanceSquared) ~= "function" then return nil end
     local sq, checked = UnitDistanceSquared("target")
     if isSecret(sq) or isSecret(checked) then return nil end
     if type(sq) ~= "number" or not checked then return nil end
     return math.sqrt(sq)
-end
-
-local function measureGuidDistance()
-    if type(UnitGUID) ~= "function" then return nil end
-    local guid = UnitGUID("target")
-    local kind = (guid or ""):match("^(%a+)%-")
-    local id = (guid or ""):match("%-(%d+)%-%x*$")
-    id = id and tonumber(id)
-    if kind == "Creature" and type(ClosestUnitPosition) == "function" and id then
-        local ok, _, _, dist = pcall(ClosestUnitPosition, id)
-        if ok and type(dist) == "number" and not isSecret(dist) then return dist end
-    elseif kind == "GameObject" and type(ClosestGameObjectPosition) == "function" and id then
-        local ok, _, _, dist = pcall(ClosestGameObjectPosition, id)
-        if ok and type(dist) == "number" and not isSecret(dist) then return dist end
-    end
-    return nil
 end
 
 local function measureUnitPosition()
@@ -98,134 +54,181 @@ local function measureUnitPosition()
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
-local function ensureRangeLib()
-    if rangeLib ~= nil then return rangeLib end
-    if type(_G.LibStub) ~= "function" then return nil end
-    local ok, lib = pcall(_G.LibStub, "LibRangeCheck-3.0", true)
-    if ok and lib then
-        rangeLib = lib
-        return rangeLib
+local function measureGuidDistance()
+    if type(UnitGUID) ~= "function" then return nil end
+    local guid = UnitGUID("target")
+    local kind = (guid or ""):match("^(%a+)%-")
+    local id = tonumber((guid or ""):match("%-(%d+)%-%x*$"))
+    if kind == "Creature" and id and type(ClosestUnitPosition) == "function" then
+        local ok, _, _, dist = pcall(ClosestUnitPosition, id)
+        if ok and type(dist) == "number" and not isSecret(dist) then return dist end
+    elseif kind == "GameObject" and id and type(ClosestGameObjectPosition) == "function" then
+        local ok, _, _, dist = pcall(ClosestGameObjectPosition, id)
+        if ok and type(dist) == "number" and not isSecret(dist) then return dist end
     end
     return nil
+end
+
+local function measureExact()
+    local v = measureUnitDistanceSquared()
+    if v then return v end
+    v = measureUnitPosition()
+    if v then return v end
+    return measureGuidDistance()
+end
+
+local function ensureRangeLib()
+    if rangeLib then return rangeLib end
+    if type(_G.LibStub) ~= "table" and type(_G.LibStub) ~= "function" then return nil end
+    local ok, lib = pcall(_G.LibStub, "LibRangeCheck-3.0", true)
+    if ok and lib then rangeLib = lib end
+    return rangeLib
 end
 
 local function measureRangeLib()
     local lib = ensureRangeLib()
     if not lib or type(lib.GetRange) ~= "function" then return nil end
     local ok, mn, mx = pcall(lib.GetRange, lib, "target")
-    if not ok then return nil end
-    if isSecret(mn) or (mx ~= nil and isSecret(mx)) then return nil end
-    if mn and mx then return "~" .. math.floor((mn + mx) / 2 + 0.5) end
-    if mx then return "<= " .. mx end
-    if mn then return ">= " .. mn end
+    if not ok or isSecret(mn) or (mx ~= nil and isSecret(mx)) then return nil end
+    if mx then return tostring(mx) end
+    if mn then return ">=" .. mn end
     return nil
+end
+
+local function interactBucket()
+    if type(CheckInteractDistance) ~= "function" then return nil end
+    local function cid(idx)
+        local ok, res = pcall(CheckInteractDistance, "target", idx)
+        if not ok or isSecret(res) then return nil end
+        return res == true or res == 1
+    end
+    if cid(3) == true then return "<=7" end
+    if cid(2) == true then return "<=8" end
+    if cid(1) == true or cid(4) == true then return "<=28" end
+    if cid(1) == false then return ">28" end
+    return nil
+end
+
+local function bucketValue(b)
+    if not b then return nil end
+    local n = b:match("(%d+)")
+    return n and tonumber(n) or nil
+end
+
+local function kalmanUpdate(z)
+    local now = GetTime()
+    if not smooth then
+        smooth, smoothVel, smoothTime = z, 0, now
+        return smooth
+    end
+    local dt = now - smoothTime
+    if dt < 0.1 then dt = 0.1 end
+    if dt > 1 then dt = 1 end
+    smooth = smooth + smoothVel * dt
+    local K = 0.25
+    smooth = smooth + K * (z - smooth)
+    smoothVel = smoothVel + 0.08 * (z - smooth) / dt
+    smoothTime = now
+    return smooth
 end
 
 local function measure()
     if not UnitExists("target") then return "" end
     if UnitIsUnit("target", "player") then return "0.0" end
 
-    local best = measureUnitDistanceSquared()
-    if not best then best = measureGuidDistance() end
-    if not best then best = measureUnitPosition() end
-    if best then return string.format("%.1f", best) end
+    local exact = measureExact()
+    if exact then
+        lastExact, lastExactTime = exact, GetTime()
+        smooth, smoothVel, smoothTime = nil, 0, 0
+        return string.format("%.1f", exact)
+    end
+    if lastExact and GetTime() - lastExactTime < 5 then
+        return string.format("%.1f (stale)", lastExact)
+    end
 
     local libRes = measureRangeLib()
-    if libRes then return libRes end
+    local z = libRes and tonumber(libRes:match("%d+")) or nil
+    if not z then
+        local b = interactBucket()
+        z = b and bucketValue(b) or nil
+        if z and b and b:sub(1,1) == ">" then z = z end
+    end
+    if z then
+        local est = kalmanUpdate(z)
+        return string.format("%.0f", est)
+    end
 
+    local bucket = interactBucket()
+    if bucket then return bucket end
+
+    if GetTime() - lastSwingTime < 2 then return "melee" end
     return "?"
 end
 
+local function stopTicker()
+    if ticker then ticker:Cancel(); ticker = nil end
+end
+
 local function startTicker()
-    if sm.ticker then return end
-    sm.ticker = C_Timer.NewTicker(0.2, function()
-        if sm.target ~= State.Target.HAS or not UnitExists("target") then
+    if ticker then return end
+    ticker = C_Timer.NewTicker(0.2, function()
+        if not hasTarget or not UnitExists("target") then
             text:SetText("")
-            if sm.ticker then
-                sm.ticker:Cancel()
-                sm.ticker = nil
-            end
-            sm.target = State.Target.NONE
+            stopTicker()
+            hasTarget = false
             return
         end
         text:SetText(measure())
     end)
-    sm.target = (UnitExists("target") and State.Target.HAS) or State.Target.NONE
 end
 
-local function stopTicker()
-    if sm.ticker then
-        sm.ticker:Cancel()
-        sm.ticker = nil
-    end
+local function applyLock(locked)
+    frame.locked = locked
+    SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
+    SimpleTargetDistanceDB.locked = locked
+    frame:EnableMouse(not locked)
 end
-
-local function transitionToTargetHas()
-    if sm.target == State.Target.HAS then
-        text:SetText(measure())
-        if sm.ticker == nil then startTicker() end
-        return
-    end
-    sm.target = State.Target.HAS
-    text:SetText(measure())
-    startTicker()
-end
-
-local function transitionToTargetNone()
-    if sm.target == State.Target.NONE and sm.ticker == nil and text:GetText() == "" then
-        return
-    end
-    sm.target = State.Target.NONE
-    text:SetText("")
-    stopTicker()
-end
-
-local function applyLockState(locked)
-    if locked then
-        sm.lock = State.Lock.LOCKED
-        frame.locked = true
-        SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
-        SimpleTargetDistanceDB.locked = true
-        frame:EnableMouse(false)
-    else
-        sm.lock = State.Lock.UNLOCKED
-        frame.locked = false
-        SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
-        SimpleTargetDistanceDB.locked = false
-        frame:EnableMouse(true)
-    end
-end
-
 
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterEvent("ADDON_LOADED")
+frame:RegisterEvent("PLAYER_SWING")
 frame:SetScript("OnEvent", function(self, event, name)
+    if event == "PLAYER_SWING" then
+        lastSwingTime = GetTime()
+        return
+    end
     if event == "PLAYER_TARGET_CHANGED" then
+        lastExact, lastExactTime = nil, 0
+        smooth, smoothVel, smoothTime = nil, 0, 0
         if UnitExists("target") then
-            transitionToTargetHas()
+            hasTarget = true
+            text:SetText(measure())
+            startTicker()
         else
-            transitionToTargetNone()
+            hasTarget = false
+            text:SetText("")
+            stopTicker()
         end
         return
     end
     if event ~= "ADDON_LOADED" or name ~= addonName then return end
-    sm.init = State.Init.INITIALIZING
     SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
     if SimpleTargetDistanceDB.point then
         self:ClearAllPoints()
         self:SetPoint(SimpleTargetDistanceDB.point, UIParent, SimpleTargetDistanceDB.relativePoint or "CENTER", SimpleTargetDistanceDB.x or 0, SimpleTargetDistanceDB.y or 0)
     end
     ensureRangeLib()
-    local locked = SimpleTargetDistanceDB.locked
-    if locked == nil then locked = true end
-    applyLockState(locked)
+    applyLock(SimpleTargetDistanceDB.locked ~= false)
     print("|cff00ff00SimpleTargetDistance|r loaded  /std unlock|lock|reset")
     if UnitExists("target") then
-        transitionToTargetHas()
+        hasTarget = true
+        text:SetText(measure())
+        startTicker()
     else
-        transitionToTargetNone()
+        hasTarget = false
+        text:SetText("")
+        stopTicker()
     end
-    sm.init = State.Init.INITIALIZED
     self:UnregisterEvent("ADDON_LOADED")
 end)
 
@@ -235,10 +238,10 @@ SlashCmdList["SIMPLETARGETDISTANCE"] = function(msg)
     msg = msg and msg:lower() or ""
     SimpleTargetDistanceDB = SimpleTargetDistanceDB or {}
     if msg == "lock" then
-        applyLockState(true)
+        applyLock(true)
         print("STD: locked")
     elseif msg == "unlock" then
-        applyLockState(false)
+        applyLock(false)
         print("STD: unlocked (drag)")
     elseif msg == "reset" then
         frame:ClearAllPoints()
